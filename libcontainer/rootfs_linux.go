@@ -392,14 +392,18 @@ func mknodDevice(dest string, node *configs.Device) error {
 }
 
 func prepareRoot(config *configs.Config) error {
+	// Convert container root into a mount point
+	if err := syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return err
+	}
+
+	// Mark container rootfs as slave/private
 	flag := syscall.MS_SLAVE | syscall.MS_REC
 	if config.Privatefs {
 		flag = syscall.MS_PRIVATE | syscall.MS_REC
 	}
-	if err := syscall.Mount("", "/", "", uintptr(flag), ""); err != nil {
-		return err
-	}
-	return syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, "")
+
+	return syscall.Mount("", "/", "", uintptr(flag), "")
 }
 
 func setReadonly() error {
