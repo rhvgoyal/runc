@@ -168,6 +168,14 @@ func mountToRootfs(m *configs.Mount, rootfs, mountLabel string) error {
 			if err := syscall.Mount("", dest, "none", uintptr(syscall.MS_PRIVATE), ""); err != nil {
 				return err
 			}
+		} else if m.Flags&syscall.MS_SLAVE != 0 {
+			if err := syscall.Mount("", dest, "none", uintptr(syscall.MS_SLAVE), ""); err != nil {
+				return err
+			}
+		} else if m.Flags&syscall.MS_SHARED != 0 {
+			if err := syscall.Mount("", dest, "none", uintptr(syscall.MS_SHARED), ""); err != nil {
+				return err
+			}
 		}
 	case "cgroup":
 		binds, err := getCgroupMounts(m)
