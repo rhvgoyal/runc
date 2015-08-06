@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -903,5 +904,65 @@ func TestMountCgroupRW(t *testing.T) {
 		if !strings.Contains(l, "rw,nosuid,nodev,noexec") {
 			t.Fatalf("Mode expected to contain 'rw,nosuid,nodev,noexec': %s", l)
 		}
+	}
+}
+
+func TestRootfsPropagationRSHARED(t *testing.T) {
+	out, err := exec.Command("findmnt", "-n", "-oPROPAGATION", "/").CombinedOutput()
+	outtrim := strings.TrimSpace(string(out))
+
+	if err != nil {
+		t.Errorf("findmnt error %q: %q", err, outtrim)
+	}
+
+	if string(outtrim) != "shared" {
+		t.Skipf("root propagation mode needs to be shared. But currently it is '%s'", outtrim)
+	}
+	testRootfsPropagationRSHARED(t)
+}
+
+func testRootfsPropagationRSHARED(t *testing.T) {
+	var rootMountLine string
+
+	if testing.Short() {
+		return
+	}
+	rootfs, err := newRootfs()
+	ok(t, err)
+	defer remove(rootfs)
+	config := newTemplateConfig(rootfs)
+
+	config.RootfsMountPropagation = configs.MNT_RSLAVE
+
+	buffers, exitCode, err := runContainer(config, "", "cat", "/proc/self/mountinfo")
+	if err != nil {
+		t.Fatalf("%s: %s", buffers, err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("exit code not 0. code %d stderr %q", exitCode, buffers.Stderr)
+	}
+	propagationInfo := buffers.Stdout.String()
+	lines := strings.Split(propagationInfo, "\n")
+	for _, l := range lines {
+		linefields := strings.Split(l, " ")
+		if len(linefields) < 5 {
+			continue
+		}
+		if linefields[4] != "/" {
+			continue
+		}
+
+		rootMountLine = l
+	}
+
+	if rootMountLine == "" {
+		t.Fatalf("Count not find root mount info")
+	}
+
+	// We found the root. Now check the option field and see
+	// if it has prefix "master:"
+	linefields := strings.Split(rootMountLine, " ")
+	if !strings.HasPrefix(linefields[6], "master:") {
+		t.Fatalf("root is not mounted in slave mode. Optional field = '%s'", linefields[6])
 	}
 }
