@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/configs"
@@ -62,7 +63,7 @@ func setupRootfs(config *configs.Config, console *linuxConsole) (err error) {
 	if config.NoPivotRoot {
 		err = msMoveRoot(config.Rootfs)
 	} else {
-		err = pivotRoot(config.Rootfs, config.PivotDir)
+		err = pivotRoot(config, config.Rootfs, config.PivotDir)
 	}
 	if err != nil {
 		return newSystemError(err)
@@ -397,15 +398,97 @@ func mknodDevice(dest string, node *configs.Device) error {
 	return syscall.Chown(dest, int(node.Uid), int(node.Gid))
 }
 
+// Get the parent mount point of directory passed in as argument.
+func getParentMount(rootfs string) (string, error) {
+	var path string
+
+	mounted, err := mount.Mounted(rootfs)
+	if err != nil {
+		return "", err
+	}
+	if mounted {
+		return rootfs, nil
+	}
+
+	path = rootfs
+	for {
+		path = filepath.Dir(path)
+
+		mounted, err := mount.Mounted(path)
+		if err != nil {
+			return "", err
+		}
+
+		if mounted {
+			return path, nil
+		}
+
+		if path == "/" {
+			break
+		}
+	}
+
+	// If we are here, we did not find parent mount. Something is wrong.
+	return "", fmt.Errorf("Could not find parent mount of %s\n", rootfs)
+}
+
+// prepare rootfs for shared propagation mount mode.
+func prepareRootfsShared(config *configs.Config) error {
+	parentMount, err := getParentMount(config.Rootfs)
+	if err != nil {
+		return err
+	}
+
+	// Make parent mount PRIVATE so bind mounting rootfs does not
+	// propagate to parent. Otherwise cleanup during container creation
+	// will be a problem. This is needed to make pivot_root() work too.
+	if err := syscall.Mount("", parentMount, "", syscall.MS_PRIVATE, ""); err != nil {
+		return err
+	}
+
+	if err := syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return err
+	}
+
+	// In case of container_shared mode, mark rootfs RPRIVATE. So that
+	// some of the mounts under it will become private (/proc, /sys, /dev)
+	// and will not propagate to host. There does not seem to be a need
+	// for it to be visible on host.
+	if err := syscall.Mount("", config.Rootfs, "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 func prepareRoot(config *configs.Config) error {
 	flag := syscall.MS_SLAVE | syscall.MS_REC
 	if config.RootfsMountPropagation == configs.MNT_RPRIVATE {
 		flag = syscall.MS_PRIVATE | syscall.MS_REC
 	}
+
+	// In case of container_shared mode, Don't do recursive private. This
+	// kills all sharing. Instead leave the scope open for some of the
+	// bind mounts to be shared. Keeping / private also makes pivot_root()
+	// work.
+	if config.RootfsMountPropagation == configs.MNT_RSHARED {
+		flag = syscall.MS_PRIVATE
+	}
+
 	if err := syscall.Mount("", "/", "", uintptr(flag), ""); err != nil {
 		return err
 	}
-	return syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, "")
+
+	if config.RootfsMountPropagation == configs.MNT_RSHARED {
+		if err := prepareRootfsShared(config); err != nil {
+			return err
+		}
+	} else {
+		if err := syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func setReadonly() error {
@@ -426,7 +509,7 @@ func setupPtmx(config *configs.Config, console *linuxConsole) error {
 	return nil
 }
 
-func pivotRoot(rootfs, pivotBaseDir string) error {
+func pivotRoot(config *configs.Config, rootfs, pivotBaseDir string) error {
 	if pivotBaseDir == "" {
 		pivotBaseDir = "/"
 	}
@@ -446,6 +529,16 @@ func pivotRoot(rootfs, pivotBaseDir string) error {
 	}
 	// path to pivot dir now changed, update
 	pivotDir = filepath.Join(pivotBaseDir, filepath.Base(pivotDir))
+
+	// If we are using container_shared mode, then make pivotDir
+	// RPRIVATE to make sure any unmounts here don't propagate to
+	// parent namespace.
+	if config.RootfsMountPropagation == configs.MNT_RSHARED {
+		if err := syscall.Mount("", pivotDir, "", syscall.MS_PRIVATE|syscall.MS_REC, ""); err != nil {
+			return err
+		}
+	}
+
 	if err := syscall.Unmount(pivotDir, syscall.MNT_DETACH); err != nil {
 		return fmt.Errorf("unmount pivot_root dir %s", err)
 	}
