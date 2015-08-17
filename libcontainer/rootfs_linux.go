@@ -466,23 +466,14 @@ func prepareRoot(config *configs.Config) error {
 		flag = syscall.MS_PRIVATE | syscall.MS_REC
 	}
 
-	// In case of container_shared mode, Don't do recursive private. This
-	// kills all sharing. Instead leave the scope open for some of the
-	// bind mounts to be shared. Keeping / private also makes pivot_root()
-	// work.
-	if config.RootfsMountPropagation == configs.MNT_RSHARED {
-		flag = syscall.MS_PRIVATE
-	}
-
-	if err := syscall.Mount("", "/", "", uintptr(flag), ""); err != nil {
-		return err
-	}
-
 	if config.RootfsMountPropagation == configs.MNT_RSHARED {
 		if err := prepareRootfsShared(config); err != nil {
 			return err
 		}
 	} else {
+		if err := syscall.Mount("", "/", "", uintptr(flag), ""); err != nil {
+			return err
+		}
 		if err := syscall.Mount(config.Rootfs, config.Rootfs, "bind", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 			return err
 		}
